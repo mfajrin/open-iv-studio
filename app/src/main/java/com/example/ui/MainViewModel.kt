@@ -8,11 +8,14 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.core.ArchiveEntryInfo
 import com.example.core.DecodedTexture
 import com.example.core.GtaColorBreakdown
 import com.example.core.GtaHashUtils
 import com.example.core.JoaatResult
 import com.example.core.RpfAndArchiveParser
+import com.example.core.RpfEncryptionType
+import com.example.core.RpfHeaderInfo
 import com.example.core.TextureDecoder
 import com.example.core.XmlTools
 import com.example.core.XmlTreeNode
@@ -111,6 +114,25 @@ data class ToolsUiState(
   val colorBreakdown: GtaColorBreakdown? = GtaHashUtils.parseHexColor("#00E5A3"),
 )
 
+data class RpfEditorUiState(
+  val archiveName: String = "",
+  val source: BinarySource? = null,
+  val header: RpfHeaderInfo? = null,
+  val headerHexPreview: String = "",
+  val isEditableOpenRpf: Boolean = false,
+  val currentFolderPath: String = "",
+  val files: Map<String, ByteArray> = emptyMap(),
+  val directories: Set<String> = emptySet(),
+  val entryMetadata: Map<String, ArchiveEntryInfo> = emptyMap(),
+  val selectedEntryPath: String? = null,
+  val selectedHexPreview: String = "",
+  val searchQuery: String = "",
+  val isDirty: Boolean = false,
+  val isLoading: Boolean = false,
+  val diagnosticMessage: String? = null,
+  val errorMessage: String? = null,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val repo = WorkspaceRepository(application)
   private val oivManager = OivInstallManager(application, repo)
@@ -133,6 +155,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   private val _toolsState = MutableStateFlow(ToolsUiState())
   val toolsState: StateFlow<ToolsUiState> = _toolsState.asStateFlow()
+
+  private val _rpfState = MutableStateFlow(RpfEditorUiState())
+  val rpfState: StateFlow<RpfEditorUiState> = _rpfState.asStateFlow()
 
   private val _oivInstallerState = MutableStateFlow(OivInstallerUiState())
   val oivInstallerState: StateFlow<OivInstallerUiState> = _oivInstallerState.asStateFlow()
@@ -387,15 +412,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  fun openSafTree(treeUri: Uri) {
+  private fun persistUriPermissionBestEffort(
+    uri: Uri,
+    tryWrite: Boolean,
+  ) {
+    val resolver = getApplication<Application>().contentResolver
+    if (tryWrite) {
+      try {
+        resolver.takePersistableUriPermission(
+          uri,
+          Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+        )
+        return
+      } catch (_: SecurityException) {
+      }
+    }
     try {
-      getApplication<Application>().contentResolver.takePersistableUriPermission(
-        treeUri,
-        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-      )
+      resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     } catch (_: SecurityException) {
     }
-    val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
+  }
+
+  fun openSafTree(treeUri: Uri) {
+    persistUriPermissionBestEffort(treeUri, tryWrite = true)
+    val rootDocId =
+      runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrElse {
+        showToast("Folder perangkat tidak valid atau tidak dapat diakses")
+        return
+      }
     val label = treeUri.lastPathSegment?.substringAfterLast(':') ?: "Folder Perangkat"
     loadLocation(
       ExplorerLocation.SafTreeDir(
@@ -412,13 +456,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     onOpenImage: () -> Unit,
     onOpenedArchive: () -> Unit,
   ) {
-    try {
-      getApplication<Application>().contentResolver.takePersistableUriPermission(
-        uri,
-        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-      )
-    } catch (_: SecurityException) {
-    }
+    persistUriPermissionBestEffort(uri, tryWrite = true)
     val name = repo.resolveSafDisplayName(uri)
     val kind = classifyFileKind(name, isDirectory = false)
     val src = BinarySource.SafUri(uri, name)
@@ -760,6 +798,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     viewModelScope.launch {
       if (src is BinarySource.ArchiveInner) {
+        if (src.archiveType == ArchiveType.RPF7 &&
+          (src.parentArchive is BinarySource.LocalFile || src.parentArchive is BinarySource.SafUri)
+        ) {
+          val rpfBytesRes = repo.readBinarySource(src.parentArchive)
+          val rpfBytes = rpfBytesRes.getOrNull()
+          val parsed = rpfBytes?.let { RpfAndArchiveParser.extractAllOpenRpf7(it).getOrNull() }
+          if (parsed != null && parsed.header.encryption == RpfEncryptionType.OPEN) {
+            val updatedFiles = parsed.files.toMutableMap()
+            updatedFiles[src.entryPath] = state.textValue.text.toByteArray(Charsets.UTF_8)
+            // Also merge any pending unsaved changes if this archive is currently open in RPF Editor
+            val activeRpf = _rpfState.value
+            val mergedFiles =
+              if (activeRpf.source == src.parentArchive && activeRpf.isEditableOpenRpf) {
+                activeRpf.files.toMutableMap().apply {
+                  this[src.entryPath] = state.textValue.text.toByteArray(Charsets.UTF_8)
+                }
+              } else {
+                updatedFiles
+              }
+            val mergedDirs =
+              if (activeRpf.source == src.parentArchive && activeRpf.isEditableOpenRpf) {
+                activeRpf.directories
+              } else {
+                parsed.directories
+              }
+            val rebuilt = RpfAndArchiveParser.buildHierarchicalOpenRpf7(mergedFiles, mergedDirs)
+            repo.writeBinarySource(src.parentArchive, rebuilt)
+              .onSuccess {
+                _xmlState.update {
+                  it.copy(
+                    isDirty = false,
+                    validationResult = XmlTools.validateXml(state.textValue.text),
+                  )
+                }
+                if (activeRpf.source == src.parentArchive) {
+                  val refreshed = RpfAndArchiveParser.extractAllOpenRpf7(rebuilt).getOrNull()
+                  _rpfState.update { cur ->
+                    cur.copy(
+                      files = refreshed?.files ?: mergedFiles,
+                      directories = refreshed?.directories ?: mergedDirs,
+                      header = refreshed?.header ?: cur.header,
+                      entryMetadata = refreshed?.entryMetadata ?: cur.entryMetadata,
+                      headerHexPreview = RpfAndArchiveParser.formatHexDump(rebuilt, 256),
+                      isDirty = false,
+                    )
+                  }
+                }
+                showToast("Disimpan langsung ke arsip .rpf (${src.entryPath})")
+                return@launch
+              }
+          }
+        }
         val exportName = state.fileName.ifBlank { "extracted_mod.xml" }
         repo.saveTextToLocalWorkspace("GTA V/mods", exportName, state.textValue.text)
           .onSuccess { newLocal ->
@@ -973,13 +1063,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun openOivFromSafUri(uri: Uri) {
-    try {
-      getApplication<Application>().contentResolver.takePersistableUriPermission(
-        uri,
-        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-      )
-    } catch (_: SecurityException) {
-    }
+    persistUriPermissionBestEffort(uri, tryWrite = false)
     val name = repo.resolveSafDisplayName(uri)
     openOivInstaller(name, BinarySource.SafUri(uri, name))
   }
@@ -1135,6 +1219,500 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           showToast(msg)
         }
         .onFailure { err -> showToast(err.message ?: "Gagal mencopot paket") }
+    }
+  }
+
+  // ==================== RPF7 ARCHIVE EDITOR ====================
+
+  fun openLocalSampleRpfInEditor() {
+    val rel = "GTA V/mods/sample_open.rpf"
+    val file = repo.getLocalFile(rel)
+    if (file.exists()) {
+      openRpfInEditor(file.name, BinarySource.LocalFile(file.absolutePath))
+    } else {
+      showToast("File sample_open.rpf tidak ditemukan")
+    }
+  }
+
+  fun openRpfFromSafUri(uri: Uri) {
+    persistUriPermissionBestEffort(uri, tryWrite = true)
+    val name = repo.resolveSafDisplayName(uri)
+    openRpfInEditor(name, BinarySource.SafUri(uri, name))
+  }
+
+  fun openRpfInEditor(
+    name: String,
+    source: BinarySource,
+  ) {
+    viewModelScope.launch {
+      _rpfState.update {
+        it.copy(
+          archiveName = name,
+          source = source,
+          isLoading = true,
+          errorMessage = null,
+          diagnosticMessage = null,
+          selectedEntryPath = null,
+          selectedHexPreview = "",
+          currentFolderPath = "",
+          searchQuery = "",
+        )
+      }
+      val bytes =
+        repo.readBinarySource(source).getOrElse { err ->
+          _rpfState.update {
+            it.copy(isLoading = false, errorMessage = err.message ?: "Gagal membaca arsip .rpf")
+          }
+          return@launch
+        }
+      RpfAndArchiveParser.extractAllOpenRpf7(bytes)
+        .onSuccess { ws ->
+          val editable =
+            ws.header.encryption == RpfEncryptionType.OPEN &&
+              (source is BinarySource.LocalFile || source is BinarySource.SafUri)
+          _rpfState.update {
+            it.copy(
+              archiveName = name,
+              source = source,
+              header = ws.header,
+              headerHexPreview = RpfAndArchiveParser.formatHexDump(bytes, 256),
+              isEditableOpenRpf = editable,
+              currentFolderPath = "",
+              files = ws.files,
+              directories = ws.directories,
+              entryMetadata = ws.entryMetadata,
+              isDirty = false,
+              isLoading = false,
+              diagnosticMessage = ws.diagnosticMessage,
+              errorMessage = null,
+            )
+          }
+        }
+        .onFailure { err ->
+          _rpfState.update {
+            it.copy(
+              isLoading = false,
+              errorMessage = err.message ?: "Bukan arsip RPF7 yang valid",
+            )
+          }
+        }
+    }
+  }
+
+  fun createNewRpfArchive(
+    rawName: String,
+    includeStarterFiles: Boolean,
+  ) {
+    val clean = rawName.trim().replace("/", "_")
+    if (clean.isEmpty()) {
+      showToast("Nama arsip .rpf tidak boleh kosong")
+      return
+    }
+    val finalName = if (clean.endsWith(".rpf", ignoreCase = true)) clean else "$clean.rpf"
+    val starterFiles =
+      if (includeStarterFiles) {
+        mapOf(
+          "common/data/handling.meta" to WorkspaceRepository.SAMPLE_HANDLING_META.toByteArray(Charsets.UTF_8),
+          "common/data/visualsettings.xml" to WorkspaceRepository.SAMPLE_VISUAL_XML.toByteArray(Charsets.UTF_8),
+          "readme_mod.txt" to
+            "Arsip RPF7 OPEN dibuat oleh OpenV Studio.\nTambahkan file XML/Meta atau tekstur .dds di sini.".toByteArray(
+              Charsets.UTF_8
+            ),
+        )
+      } else {
+        emptyMap()
+      }
+    val initialDirs =
+      if (includeStarterFiles) setOf("common", "common/data", "x64", "x64/textures")
+      else setOf("common", "x64")
+
+    viewModelScope.launch {
+      val rpfBytes = RpfAndArchiveParser.buildHierarchicalOpenRpf7(starterFiles, initialDirs)
+      repo.saveBytesToLocalWorkspace("GTA V/mods", finalName, rpfBytes)
+        .onSuccess { localSrc ->
+          openRpfInEditor(finalName, localSrc)
+          val loc = _explorerState.value.location
+          if (loc is ExplorerLocation.LocalDir) loadLocation(loc)
+          showToast("Arsip $finalName berhasil dibuat di GTA V/mods/")
+        }
+        .onFailure { showToast(it.message ?: "Gagal membuat arsip .rpf") }
+    }
+  }
+
+  fun setRpfSearchQuery(query: String) {
+    _rpfState.update { it.copy(searchQuery = query) }
+  }
+
+  fun navigateRpfFolder(folderPath: String) {
+    _rpfState.update {
+      it.copy(
+        currentFolderPath = folderPath.trim('/'),
+        selectedEntryPath = null,
+        selectedHexPreview = "",
+      )
+    }
+  }
+
+  fun navigateRpfUp(): Boolean {
+    val cur = _rpfState.value.currentFolderPath.trim('/')
+    if (cur.isEmpty()) return false
+    val parent = cur.substringBeforeLast('/', "")
+    navigateRpfFolder(parent)
+    return true
+  }
+
+  fun selectRpfEntryForHex(entryPath: String?) {
+    if (entryPath == null) {
+      _rpfState.update { it.copy(selectedEntryPath = null, selectedHexPreview = "") }
+      return
+    }
+    val bytes = _rpfState.value.files[entryPath]
+    val preview =
+      if (bytes != null) RpfAndArchiveParser.formatHexDump(bytes, 512)
+      else "(Direktori dalam RPF7)"
+    _rpfState.update { it.copy(selectedEntryPath = entryPath, selectedHexPreview = preview) }
+  }
+
+  fun createRpfSubfolder(folderName: String) {
+    val st = _rpfState.value
+    if (!_editMode.value) {
+      showToast("Aktifkan Edit Mode untuk mengedit RPF")
+      return
+    }
+    if (!st.isEditableOpenRpf) {
+      showToast("Arsip ini bersifat baca-saja (bukan RPF7 OPEN)")
+      return
+    }
+    val clean = folderName.trim().replace("/", "_").replace("..", "")
+    if (clean.isEmpty()) return
+    val fullDir =
+      if (st.currentFolderPath.isEmpty()) clean else "${st.currentFolderPath}/$clean"
+    if (fullDir in st.directories || fullDir in st.files) {
+      showToast("Nama '$clean' sudah ada di folder ini")
+      return
+    }
+    _rpfState.update { it.copy(directories = it.directories + fullDir, isDirty = true) }
+    showToast("Folder '$clean' ditambahkan (ketuk Simpan untuk menulis .rpf)")
+  }
+
+  fun createRpfXmlFile(
+    rawFileName: String,
+    templateType: String,
+  ) {
+    val st = _rpfState.value
+    if (!_editMode.value) {
+      showToast("Aktifkan Edit Mode untuk menambah file ke RPF")
+      return
+    }
+    if (!st.isEditableOpenRpf) {
+      showToast("Arsip ini bersifat baca-saja")
+      return
+    }
+    val clean = rawFileName.trim().replace("/", "_").replace("..", "")
+    if (clean.isEmpty()) return
+    val finalName = if (clean.contains('.')) clean else "$clean.xml"
+    val fullPath =
+      if (st.currentFolderPath.isEmpty()) finalName else "${st.currentFolderPath}/$finalName"
+    val text =
+      when (templateType) {
+        "handling" -> WorkspaceRepository.SAMPLE_HANDLING_META
+        "vehicles" -> WorkspaceRepository.SAMPLE_VEHICLES_META
+        "assembly" -> WorkspaceRepository.SAMPLE_OIV_ASSEMBLY_XML
+        else ->
+          """<?xml version="1.0" encoding="UTF-8"?>
+<ModConfig>
+  <Item name="rpf_entry">
+    <Value value="1.0000" />
+  </Item>
+</ModConfig>"""
+      }
+    _rpfState.update {
+      it.copy(
+        files = it.files + (fullPath to text.toByteArray(Charsets.UTF_8)),
+        isDirty = true,
+      )
+    }
+    showToast("File $finalName ditambahkan ke RPF (ketuk Simpan)")
+  }
+
+  fun importFileIntoRpfFromSaf(uri: Uri) {
+    val st = _rpfState.value
+    if (!_editMode.value) {
+      showToast("Aktifkan Edit Mode untuk mengimpor file ke RPF")
+      return
+    }
+    if (!st.isEditableOpenRpf) {
+      showToast("Arsip RPF ini tidak mendukung penulisan")
+      return
+    }
+    viewModelScope.launch {
+      val name = repo.resolveSafDisplayName(uri).replace("/", "_").ifBlank { "imported_file.bin" }
+      val bytes =
+        repo.readBinarySource(BinarySource.SafUri(uri, name)).getOrElse { err ->
+          showToast(err.message ?: "Gagal membaca file dari perangkat")
+          return@launch
+        }
+      val fullPath =
+        if (st.currentFolderPath.isEmpty()) name else "${st.currentFolderPath}/$name"
+      _rpfState.update { cur ->
+        cur.copy(
+          files = cur.files + (fullPath to bytes),
+          isDirty = true,
+        )
+      }
+      showToast("$name (${bytes.size} B) ditambahkan ke RPF (ketuk Simpan)")
+    }
+  }
+
+  fun renameRpfEntry(
+    oldPath: String,
+    isDirectory: Boolean,
+    newNameRaw: String,
+  ) {
+    val st = _rpfState.value
+    if (!_editMode.value || !st.isEditableOpenRpf) {
+      showToast("Aktifkan Edit Mode pada arsip RPF7 OPEN untuk mengubah nama")
+      return
+    }
+    val cleanNew = newNameRaw.trim().replace("/", "_").replace("..", "")
+    if (cleanNew.isEmpty()) return
+    val parent = oldPath.substringBeforeLast('/', "")
+    val newPath = if (parent.isEmpty()) cleanNew else "$parent/$cleanNew"
+    if (newPath == oldPath) return
+    if (newPath in st.files || newPath in st.directories) {
+      showToast("Nama '$cleanNew' sudah digunakan")
+      return
+    }
+
+    if (!isDirectory) {
+      val payload = st.files[oldPath] ?: return
+      _rpfState.update {
+        it.copy(
+          files = (it.files - oldPath) + (newPath to payload),
+          selectedEntryPath = if (it.selectedEntryPath == oldPath) newPath else it.selectedEntryPath,
+          isDirty = true,
+        )
+      }
+    } else {
+      val prefix = "$oldPath/"
+      val newFiles = linkedMapOf<String, ByteArray>()
+      st.files.forEach { (k, v) ->
+        if (k.startsWith(prefix)) newFiles["$newPath/${k.removePrefix(prefix)}"] = v
+        else newFiles[k] = v
+      }
+      val newDirs = linkedSetOf<String>()
+      st.directories.forEach { d ->
+        when {
+          d == oldPath -> newDirs.add(newPath)
+          d.startsWith(prefix) -> newDirs.add("$newPath/${d.removePrefix(prefix)}")
+          else -> newDirs.add(d)
+        }
+      }
+      _rpfState.update {
+        it.copy(
+          files = newFiles,
+          directories = newDirs,
+          selectedEntryPath = null,
+          isDirty = true,
+        )
+      }
+    }
+    showToast("Diubah menjadi $cleanNew (ketuk Simpan)")
+  }
+
+  fun deleteRpfEntry(
+    targetPath: String,
+    isDirectory: Boolean,
+  ) {
+    val st = _rpfState.value
+    if (!_editMode.value || !st.isEditableOpenRpf) {
+      showToast("Aktifkan Edit Mode pada arsip RPF7 OPEN untuk menghapus entri")
+      return
+    }
+    if (!isDirectory) {
+      _rpfState.update {
+        it.copy(
+          files = it.files - targetPath,
+          selectedEntryPath = if (it.selectedEntryPath == targetPath) null else it.selectedEntryPath,
+          selectedHexPreview = if (it.selectedEntryPath == targetPath) "" else it.selectedHexPreview,
+          isDirty = true,
+        )
+      }
+    } else {
+      val prefix = "$targetPath/"
+      _rpfState.update {
+        it.copy(
+          files = it.files.filterKeys { k -> k != targetPath && !k.startsWith(prefix) },
+          directories = it.directories.filterNot { d -> d == targetPath || d.startsWith(prefix) }.toSet(),
+          selectedEntryPath = null,
+          selectedHexPreview = "",
+          isDirty = true,
+        )
+      }
+    }
+    showToast("Entri dihapus dari RPF (ketuk Simpan untuk menerapkan)")
+  }
+
+  fun saveRpfArchive() {
+    val st = _rpfState.value
+    val src = st.source ?: return
+    if (!_editMode.value) {
+      showToast("Aktifkan Edit Mode untuk menyimpan arsip .rpf")
+      return
+    }
+    if (!st.isEditableOpenRpf) {
+      showToast("Arsip terenkripsi tidak dapat ditulis ulang")
+      return
+    }
+    viewModelScope.launch {
+      _rpfState.update { it.copy(isLoading = true) }
+      val rebuilt = RpfAndArchiveParser.buildHierarchicalOpenRpf7(st.files, st.directories)
+      repo.writeBinarySource(src, rebuilt)
+        .onSuccess {
+          val refreshed = RpfAndArchiveParser.extractAllOpenRpf7(rebuilt).getOrNull()
+          _rpfState.update { cur ->
+            cur.copy(
+              header = refreshed?.header ?: cur.header,
+              entryMetadata = refreshed?.entryMetadata ?: cur.entryMetadata,
+              headerHexPreview = RpfAndArchiveParser.formatHexDump(rebuilt, 256),
+              diagnosticMessage = refreshed?.diagnosticMessage ?: "RPF7 disimpan",
+              isDirty = false,
+              isLoading = false,
+            )
+          }
+          val expLoc = _explorerState.value.location
+          if (expLoc is ExplorerLocation.LocalDir) loadLocation(expLoc)
+          showToast("${st.archiveName} dibangun ulang & disimpan (${rebuilt.size} B)")
+        }
+        .onFailure { err ->
+          _rpfState.update { it.copy(isLoading = false) }
+          showToast(err.message ?: "Gagal menyimpan arsip .rpf")
+        }
+    }
+  }
+
+  fun exportRpfArchiveToSafUri(destUri: Uri) {
+    val st = _rpfState.value
+    if (st.source == null) return
+    viewModelScope.launch {
+      val bytes =
+        if (st.isEditableOpenRpf) {
+          RpfAndArchiveParser.buildHierarchicalOpenRpf7(st.files, st.directories)
+        } else {
+          repo.readBinarySource(st.source).getOrElse {
+            showToast(it.message ?: "Gagal membaca sumber .rpf")
+            return@launch
+          }
+        }
+      repo.exportBytesToSafUri(destUri, bytes)
+        .onSuccess { showToast("Arsip .rpf diekspor ke perangkat (${bytes.size} B)") }
+        .onFailure { showToast(it.message ?: "Gagal mengekspor .rpf") }
+    }
+  }
+
+  fun extractRpfEntryToMods(entryPath: String) {
+    val bytes = _rpfState.value.files[entryPath] ?: return
+    val name = entryPath.substringAfterLast('/')
+    viewModelScope.launch {
+      repo.saveBytesToLocalWorkspace("GTA V/mods", name, bytes)
+        .onSuccess {
+          val expLoc = _explorerState.value.location
+          if (expLoc is ExplorerLocation.LocalDir) loadLocation(expLoc)
+          showToast("$name diekstrak ke GTA V/mods/$name")
+        }
+        .onFailure { showToast(it.message ?: "Gagal mengekstrak entri") }
+    }
+  }
+
+  fun extractRpfEntryToSafUri(
+    entryPath: String,
+    destUri: Uri,
+  ) {
+    val bytes = _rpfState.value.files[entryPath] ?: return
+    viewModelScope.launch {
+      repo.exportBytesToSafUri(destUri, bytes)
+        .onSuccess { showToast("${entryPath.substringAfterLast('/')} diekstrak ke perangkat") }
+        .onFailure { showToast(it.message ?: "Gagal mengekstrak file") }
+    }
+  }
+
+  fun openRpfEntryInXmlEditor(
+    entryPath: String,
+    onNavigateToXml: () -> Unit,
+  ) {
+    val st = _rpfState.value
+    val rpfSrc = st.source ?: return
+    val bytes = st.files[entryPath] ?: return
+    val text = String(bytes, Charsets.UTF_8)
+    val tfv = TextFieldValue(text, TextRange(0))
+    val validation = XmlTools.validateXml(text)
+    val tree = XmlTools.parseXmlTree(text).getOrNull()
+    val entryName = entryPath.substringAfterLast('/')
+    _xmlState.update {
+      it.copy(
+        fileName = entryName,
+        source = BinarySource.ArchiveInner(rpfSrc, ArchiveType.RPF7, entryPath),
+        textValue = tfv,
+        undoStack = emptyList(),
+        redoStack = emptyList(),
+        isDirty = false,
+        isReadOnlyArchive = !st.isEditableOpenRpf,
+        validationResult = validation,
+        treeNode = tree,
+        isLoading = false,
+      )
+    }
+    onNavigateToXml()
+  }
+
+  fun openRpfEntryInImageViewer(
+    entryPath: String,
+    onNavigateToImage: () -> Unit,
+  ) {
+    val st = _rpfState.value
+    val rpfSrc = st.source ?: return
+    val bytes = st.files[entryPath] ?: return
+    val entryName = entryPath.substringAfterLast('/')
+    val archiveSrc = BinarySource.ArchiveInner(rpfSrc, ArchiveType.RPF7, entryPath)
+    viewModelScope.launch {
+      _imageState.update {
+        it.copy(
+          fileName = entryName,
+          source = archiveSrc,
+          siblings = listOf(TextureItemRef(entryName, archiveSrc)),
+          isLoading = true,
+          errorMessage = null,
+          rotationDegrees = 0f,
+          sampledPixel = null,
+        )
+      }
+      TextureDecoder.decode(bytes, entryName)
+        .onSuccess { decoded ->
+          val cx = (decoded.width / 2).coerceAtLeast(0)
+          val cy = (decoded.height / 2).coerceAtLeast(0)
+          val centerSample =
+            if (decoded.width > 0 && decoded.height > 0) {
+              buildPixelSample(decoded.bitmap.getPixel(cx, cy), cx, cy)
+            } else null
+          _imageState.update {
+            it.copy(
+              decoded = decoded,
+              sampledPixel = centerSample,
+              isLoading = false,
+              errorMessage = null,
+            )
+          }
+        }
+        .onFailure { err ->
+          _imageState.update {
+            it.copy(
+              decoded = null,
+              isLoading = false,
+              errorMessage = err.message ?: "Gagal mendekode tekstur dari RPF",
+            )
+          }
+        }
+      onNavigateToImage()
     }
   }
 }

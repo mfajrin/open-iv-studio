@@ -340,10 +340,46 @@ class WorkspaceRepository(private val context: Context) {
       }
     }
 
+  suspend fun writeBinarySource(
+    source: BinarySource,
+    bytes: ByteArray,
+  ): Result<Unit> =
+    withContext(Dispatchers.IO) {
+      try {
+        when (source) {
+          is BinarySource.LocalFile -> {
+            val target = File(source.absolutePath)
+            target.parentFile?.mkdirs()
+            target.writeBytes(bytes)
+            Result.success(Unit)
+          }
+          is BinarySource.SafUri -> {
+            context.contentResolver.openOutputStream(source.uri, "wt")?.use { out ->
+              out.write(bytes)
+              out.flush()
+            } ?: return@withContext Result.failure(IllegalStateException("File perangkat bersifat baca-saja"))
+            Result.success(Unit)
+          }
+          is BinarySource.ArchiveInner -> {
+            Result.failure(UnsupportedOperationException("Arsip bersarang tidak dapat ditulis langsung; ekspor ke workspace."))
+          }
+        }
+      } catch (e: Exception) {
+        Result.failure(e)
+      }
+    }
+
   suspend fun saveTextToLocalWorkspace(
     relativeFolder: String,
     fileName: String,
     content: String,
+  ): Result<BinarySource.LocalFile> =
+    saveBytesToLocalWorkspace(relativeFolder, fileName, content.toByteArray(Charsets.UTF_8))
+
+  suspend fun saveBytesToLocalWorkspace(
+    relativeFolder: String,
+    fileName: String,
+    bytes: ByteArray,
   ): Result<BinarySource.LocalFile> =
     withContext(Dispatchers.IO) {
       try {
@@ -351,9 +387,9 @@ class WorkspaceRepository(private val context: Context) {
           if (relativeFolder.isBlank()) File(workspaceRoot, "GTA V/mods")
           else File(workspaceRoot, relativeFolder.trim('/'))
         dir.mkdirs()
-        val safeName = fileName.replace("/", "_").ifBlank { "untitled.xml" }
+        val safeName = fileName.replace("/", "_").ifBlank { "untitled.bin" }
         val target = File(dir, safeName)
-        target.writeText(content, Charsets.UTF_8)
+        target.writeBytes(bytes)
         Result.success(BinarySource.LocalFile(target.absolutePath))
       } catch (e: Exception) {
         Result.failure(e)

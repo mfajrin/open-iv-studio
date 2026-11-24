@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -523,8 +524,12 @@ private fun ImageEmptyStartPanel(
   onOpenDdsOrTga: () -> Unit,
   onOpenSampleRelative: (String) -> Unit,
 ) {
+  Box(
+    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+    contentAlignment = Alignment.TopCenter,
+  ) {
   Column(
-    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+    modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth().padding(20.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
     Surface(
@@ -607,5 +612,6 @@ private fun ImageEmptyStartPanel(
         }
       }
     }
+  }
   }
 }

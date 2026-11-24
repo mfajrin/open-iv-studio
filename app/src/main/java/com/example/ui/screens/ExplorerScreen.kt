@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -82,6 +84,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.ArchiveType
+import com.example.data.BinarySource
 import com.example.data.ExplorerFilter
 import com.example.data.ExplorerLocation
 import com.example.data.ModFileEntry
@@ -115,6 +119,8 @@ fun ExplorerScreen(
   onQuickOpenXml: (String) -> Unit,
   onQuickOpenImage: (String) -> Unit,
   onQuickOpenOiv: (String, String) -> Unit,
+  onQuickOpenRpfEditor: () -> Unit,
+  onOpenRpfInEditor: (String, BinarySource) -> Unit,
   onCreateNewXml: (String, String) -> Unit,
   onCreateNewFolder: (String) -> Unit,
   onRenameEntry: (ModFileEntry, String) -> Unit,
@@ -204,7 +210,7 @@ fun ExplorerScreen(
       modifier = Modifier.fillMaxSize(),
       containerColor = Color.Transparent,
       floatingActionButton = {
-        if (editMode && isLocalDir) {
+        if (editMode && isLocalDir && !isRootWorkspace) {
           FloatingActionButton(
             onClick = { showCreateDialog = true },
             containerColor = EmeraldPrimary,
@@ -217,12 +223,16 @@ fun ExplorerScreen(
       },
     ) { innerPadding ->
       Column(
-        modifier = Modifier.fillMaxSize().padding(bottom = innerPadding.calculateBottomPadding()),
+        modifier =
+          Modifier.fillMaxSize()
+            .padding(bottom = innerPadding.calculateBottomPadding()),
+        horizontalAlignment = Alignment.CenterHorizontally,
       ) {
       // Compact Top Control Strip: Search Pill + Breadcrumb
       Column(
         modifier =
-          Modifier.fillMaxWidth()
+          Modifier.widthIn(max = 900.dp)
+            .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
@@ -259,12 +269,15 @@ fun ExplorerScreen(
         }
         else -> {
           LazyColumn(
-            modifier = Modifier.fillMaxSize().testTag("explorer_file_list"),
+            modifier = Modifier.widthIn(max = 900.dp).fillMaxSize().testTag("explorer_file_list"),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 92.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
           ) {
+            val isHomeDashboard =
+              isRootWorkspace && state.searchQuery.isBlank() && state.filter == ExplorerFilter.ALL
+
             // Root Home Dashboard Showcase (clean, modern, uncluttered)
-            if (isRootWorkspace && state.searchQuery.isBlank() && state.filter == ExplorerFilter.ALL) {
+            if (isHomeDashboard) {
               item(key = "hero_banner") {
                 ModernHeroCard()
               }
@@ -274,7 +287,7 @@ fun ExplorerScreen(
                   onOpenFile = { openDocumentLauncher.launch(arrayOf("*/*")) },
                   onOpenFolder = { openTreeLauncher.launch(null) },
                   onInstallOiv = { openOivLauncher.launch(arrayOf("*/*")) },
-                  onWorkspaceHome = onOpenWorkspaceHome,
+                  onWorkspaceHome = { onOpenLocation(ExplorerLocation.LocalDir("GTA V/mods")) },
                 )
               }
 
@@ -289,12 +302,14 @@ fun ExplorerScreen(
                   onOpenSampleOiv = {
                     onQuickOpenOiv("Custom_Livery_Pack.oiv", "GTA V/mods/Custom_Livery_Pack.oiv")
                   },
+                  onOpenSampleRpf = onQuickOpenRpfEditor,
                 )
               }
             }
 
-            // Filter Pills
-            item(key = "filter_strip") {
+            if (!isHomeDashboard) {
+              // Filter Pills
+              item(key = "filter_strip") {
               Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -318,6 +333,8 @@ fun ExplorerScreen(
             // Diagnostic banner for RPF7 / OIV / YTD
             state.diagnosticBanner?.let { info ->
               item(key = "diagnostic_banner") {
+                val loc = state.location
+                val isRpfView = loc is ExplorerLocation.ArchiveView && loc.archiveType == ArchiveType.RPF7
                 Surface(
                   modifier = Modifier.fillMaxWidth(),
                   color = CyanContainer.copy(alpha = 0.45f),
@@ -339,7 +356,22 @@ fun ExplorerScreen(
                       text = info,
                       style = MaterialTheme.typography.bodySmall,
                       color = MaterialTheme.colorScheme.onSurface,
+                      modifier = Modifier.weight(1f),
                     )
+                    if (isRpfView) {
+                      val rpfLoc = loc as ExplorerLocation.ArchiveView
+                      Spacer(Modifier.width(8.dp))
+                      TextButton(
+                        onClick = { onOpenRpfInEditor(rpfLoc.archiveTitle, rpfLoc.archiveSource) },
+                        modifier = Modifier.testTag("explorer_edit_rpf_btn"),
+                      ) {
+                        Text(
+                          text = "Edit RPF",
+                          color = EmeraldPrimary,
+                          fontWeight = FontWeight.SemiBold,
+                        )
+                      }
+                    }
                   }
                 }
               }
@@ -411,6 +443,7 @@ fun ExplorerScreen(
                   onDelete = { deleteTarget = entry },
                 )
               }
+            }
             }
           }
         }
@@ -590,52 +623,99 @@ private fun QuickActionsBentoGrid(
   onInstallOiv: () -> Unit,
   onWorkspaceHome: () -> Unit,
 ) {
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Row(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      BentoActionTile(
-        title = "Buka File",
-        subtitle = "XML, DDS, RPF",
-        icon = Icons.Rounded.FileOpen,
-        accent = EmeraldPrimary,
-        container = EmeraldContainer,
-        onClick = onOpenFile,
-        modifier = Modifier.weight(1f).testTag("btn_open_saf_file"),
-      )
-      BentoActionTile(
-        title = "Buka Folder",
-        subtitle = "Direktori SAF",
-        icon = Icons.Rounded.FolderOpen,
-        accent = CyanTertiary,
-        container = CyanContainer,
-        onClick = onOpenFolder,
-        modifier = Modifier.weight(1f).testTag("btn_open_saf_folder"),
-      )
-    }
-    Row(
-      modifier = Modifier.fillMaxWidth(),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-      BentoActionTile(
-        title = "Instal .oiv",
-        subtitle = "Pasang Mod Pack",
-        icon = Icons.Rounded.InstallMobile,
-        accent = AmberSecondary,
-        container = AmberContainer,
-        onClick = onInstallOiv,
-        modifier = Modifier.weight(1f).testTag("btn_install_oiv_file"),
-      )
-      BentoActionTile(
-        title = "GTA V Sample",
-        subtitle = "Workspace Lokal",
-        icon = Icons.Rounded.Home,
-        accent = MaterialTheme.colorScheme.onSurface,
-        container = ElevatedContainer,
-        onClick = onWorkspaceHome,
-        modifier = Modifier.weight(1f).testTag("btn_workspace_home"),
-      )
+  BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+    val wideRow = maxWidth >= 560.dp
+    if (wideRow) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        BentoActionTile(
+          title = "Buka File",
+          subtitle = "XML, DDS, RPF",
+          icon = Icons.Rounded.FileOpen,
+          accent = EmeraldPrimary,
+          container = EmeraldContainer,
+          onClick = onOpenFile,
+          modifier = Modifier.weight(1f).testTag("btn_open_saf_file"),
+        )
+        BentoActionTile(
+          title = "Buka Folder",
+          subtitle = "Direktori SAF",
+          icon = Icons.Rounded.FolderOpen,
+          accent = CyanTertiary,
+          container = CyanContainer,
+          onClick = onOpenFolder,
+          modifier = Modifier.weight(1f).testTag("btn_open_saf_folder"),
+        )
+        BentoActionTile(
+          title = "Instal .oiv",
+          subtitle = "Pasang Mod Pack",
+          icon = Icons.Rounded.InstallMobile,
+          accent = AmberSecondary,
+          container = AmberContainer,
+          onClick = onInstallOiv,
+          modifier = Modifier.weight(1f).testTag("btn_install_oiv_file"),
+        )
+        BentoActionTile(
+          title = "Folder Mods",
+          subtitle = "GTA V/mods",
+          icon = Icons.Rounded.Home,
+          accent = MaterialTheme.colorScheme.onSurface,
+          container = ElevatedContainer,
+          onClick = onWorkspaceHome,
+          modifier = Modifier.weight(1f).testTag("btn_workspace_home"),
+        )
+      }
+    } else {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          BentoActionTile(
+            title = "Buka File",
+            subtitle = "XML, DDS, RPF",
+            icon = Icons.Rounded.FileOpen,
+            accent = EmeraldPrimary,
+            container = EmeraldContainer,
+            onClick = onOpenFile,
+            modifier = Modifier.weight(1f).testTag("btn_open_saf_file"),
+          )
+          BentoActionTile(
+            title = "Buka Folder",
+            subtitle = "Direktori SAF",
+            icon = Icons.Rounded.FolderOpen,
+            accent = CyanTertiary,
+            container = CyanContainer,
+            onClick = onOpenFolder,
+            modifier = Modifier.weight(1f).testTag("btn_open_saf_folder"),
+          )
+        }
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          BentoActionTile(
+            title = "Instal .oiv",
+            subtitle = "Pasang Mod Pack",
+            icon = Icons.Rounded.InstallMobile,
+            accent = AmberSecondary,
+            container = AmberContainer,
+            onClick = onInstallOiv,
+            modifier = Modifier.weight(1f).testTag("btn_install_oiv_file"),
+          )
+          BentoActionTile(
+            title = "Folder Mods",
+            subtitle = "GTA V/mods",
+            icon = Icons.Rounded.Home,
+            accent = MaterialTheme.colorScheme.onSurface,
+            container = ElevatedContainer,
+            onClick = onWorkspaceHome,
+            modifier = Modifier.weight(1f).testTag("btn_workspace_home"),
+          )
+        }
+      }
     }
   }
 }
@@ -696,6 +776,7 @@ private fun QuickShortcutsSection(
   onOpenHandlingXml: () -> Unit,
   onOpenTextureDds: () -> Unit,
   onOpenSampleOiv: () -> Unit,
+  onOpenSampleRpf: () -> Unit,
 ) {
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Text(
@@ -707,6 +788,14 @@ private fun QuickShortcutsSection(
       modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+      QuickShortcutChipCard(
+        title = "sample_open.rpf",
+        tag = "RPF EDITOR",
+        icon = Icons.Rounded.Inventory2,
+        accent = EmeraldPrimary,
+        onClick = onOpenSampleRpf,
+        modifier = Modifier.testTag("shortcut_sample_rpf"),
+      )
       QuickShortcutChipCard(
         title = "handling.meta",
         tag = "XML EDITOR",

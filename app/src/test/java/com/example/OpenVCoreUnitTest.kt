@@ -42,6 +42,36 @@ class OpenVCoreUnitTest {
   }
 
   @Test
+  fun rpf7_hierarchicalBuildAndExtractAll_roundTripsNestedFoldersAndHex() {
+    val handlingBytes = "<CHandlingDataMgr />".toByteArray(Charsets.UTF_8)
+    val binaryBytes = byteArrayOf(0x52, 0x50, 0x46, 0x37, 0x01, 0x02, 0x7F.toByte(), 0x00)
+    val rpfBytes =
+      RpfAndArchiveParser.buildHierarchicalOpenRpf7(
+        files =
+          mapOf(
+            "common/data/handling.meta" to handlingBytes,
+            "x64/textures/livery.bin" to binaryBytes,
+          ),
+        emptyDirs = setOf("empty_dir", "common/empty_sub"),
+      )
+
+    val ws = RpfAndArchiveParser.extractAllOpenRpf7(rpfBytes).getOrThrow()
+    assertEquals(RpfEncryptionType.OPEN, ws.header.encryption)
+    assertTrue(ws.files.containsKey("common/data/handling.meta"))
+    assertTrue(ws.files.containsKey("x64/textures/livery.bin"))
+    assertTrue(ws.directories.contains("empty_dir"))
+    assertTrue(ws.directories.contains("common/empty_sub"))
+    assertEquals(
+      String(handlingBytes, Charsets.UTF_8),
+      String(ws.files.getValue("common/data/handling.meta"), Charsets.UTF_8),
+    )
+
+    val hex = RpfAndArchiveParser.formatHexDump(binaryBytes, 64)
+    assertTrue(hex.contains("52 50 46 37"))
+    assertTrue(hex.contains("RPF7"))
+  }
+
+  @Test
   fun xmlTools_validatesFormatsAndParsesTree() {
     val raw = "<Root><Item type=\"CHandlingData\"><fMass value=\"1500\"/></Item></Root>"
     val valid = XmlTools.validateXml(raw)

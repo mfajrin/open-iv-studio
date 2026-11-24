@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -631,8 +632,12 @@ private fun XmlEmptyStartPanel(
   onOpenDeviceFile: () -> Unit,
   onOpenSampleRelative: (String) -> Unit,
 ) {
+  Box(
+    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+    contentAlignment = Alignment.TopCenter,
+  ) {
   Column(
-    modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+    modifier = Modifier.widthIn(max = 780.dp).fillMaxWidth().padding(20.dp),
     verticalArrangement = Arrangement.spacedBy(16.dp),
   ) {
     Surface(
@@ -717,5 +722,6 @@ private fun XmlEmptyStartPanel(
         }
       }
     }
+  }
   }
 }

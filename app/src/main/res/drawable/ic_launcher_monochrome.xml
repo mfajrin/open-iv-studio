@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Minimalist geometric 'V' + archive prism mark for Android 16 monochrome themed icons -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M31,34 L42,34 L54,66 L66,34 L77,34 L59.5,77 L48.5,77 Z" />
+    <path
+        android:fillColor="#000000"
+        android:pathData="M43,27 L65,27 L61,32 L47,32 Z" />
+</vector>

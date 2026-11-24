@@ -232,33 +232,169 @@ object RpfAndArchiveParser {
     return Result.success(slice)
   }
 
+data class ExtractedRpf7Workspace(
+  val header: RpfHeaderInfo,
+  val files: Map<String, ByteArray>,
+  val directories: Set<String>,
+  val entryMetadata: Map<String, ArchiveEntryInfo>,
+  val diagnosticMessage: String,
+)
+
+  fun extractAllOpenRpf7(rpfBytes: ByteArray): Result<ExtractedRpf7Workspace> {
+    val parsed = parseRpf7(rpfBytes).getOrElse { return Result.failure(it) }
+    val metaMap = parsed.entries.associateBy { it.fullPath }
+    if (parsed.header.encryption != RpfEncryptionType.OPEN) {
+      return Result.success(
+        ExtractedRpf7Workspace(
+          header = parsed.header,
+          files = emptyMap(),
+          directories = emptySet(),
+          entryMetadata = metaMap,
+          diagnosticMessage = parsed.diagnosticMessage,
+        )
+      )
+    }
+
+    val dirs = linkedSetOf<String>()
+    val files = linkedMapOf<String, ByteArray>()
+    for (entry in parsed.entries) {
+      if (entry.isDirectory) {
+        dirs.add(entry.fullPath)
+      } else {
+        val data = extractRpf7Entry(rpfBytes, entry).getOrElse { return Result.failure(it) }
+        files[entry.fullPath] = data
+        val parent = entry.fullPath.substringBeforeLast('/', "")
+        if (parent.isNotEmpty()) {
+          val parts = parent.split('/')
+          for (i in 1..parts.size) {
+            dirs.add(parts.subList(0, i).joinToString("/"))
+          }
+        }
+      }
+    }
+    return Result.success(
+      ExtractedRpf7Workspace(
+        header = parsed.header,
+        files = files,
+        directories = dirs,
+        entryMetadata = metaMap,
+        diagnosticMessage = parsed.diagnosticMessage,
+      )
+    )
+  }
+
   /**
-   * Builds a genuine unencrypted RPF7 OPEN archive binary for the bundled sample workspace.
+   * Builds a genuine unencrypted RPF7 OPEN archive binary supporting nested directories.
    */
-  fun buildOpenRpf7(files: Map<String, ByteArray>): ByteArray {
-    // Root dir (idx 0) + 1 folder or flat files
-    val sorted = files.entries.sortedBy { it.key }
-    val entryCount = 1 + sorted.size
+  fun buildOpenRpf7(files: Map<String, ByteArray>): ByteArray =
+    buildHierarchicalOpenRpf7(files = files, emptyDirs = emptySet())
+
+  fun buildHierarchicalOpenRpf7(
+    files: Map<String, ByteArray>,
+    emptyDirs: Set<String> = emptySet(),
+  ): ByteArray {
+    class DirNode(
+      val name: String,
+      val fullPath: String,
+    ) {
+      val subDirs = linkedMapOf<String, DirNode>()
+      val leafFiles = linkedMapOf<String, ByteArray>()
+    }
+
+    val root = DirNode(name = "", fullPath = "")
+
+    fun ensureDir(path: String): DirNode {
+      val parts = path.trim('/').replace('\\', '/').split('/').filter { it.isNotBlank() && it != ".." }
+      var cur = root
+      var acc = ""
+      for (part in parts) {
+        acc = if (acc.isEmpty()) part else "$acc/$part"
+        cur = cur.subDirs.getOrPut(part) { DirNode(name = part, fullPath = acc) }
+      }
+      return cur
+    }
+
+    emptyDirs.forEach { dirPath ->
+      if (dirPath.isNotBlank()) ensureDir(dirPath)
+    }
+
+    files.entries.sortedBy { it.key }.forEach { (rawPath, data) ->
+      val clean = rawPath.trim('/').replace('\\', '/')
+      if (clean.isEmpty()) return@forEach
+      val parts = clean.split('/').filter { it.isNotBlank() && it != ".." }
+      if (parts.isEmpty()) return@forEach
+      val parentDir =
+        if (parts.size == 1) root
+        else ensureDir(parts.subList(0, parts.size - 1).joinToString("/"))
+      parentDir.leafFiles[parts.last()] = data
+    }
+
+    class TocSlot(
+      val name: String,
+      val dirNode: DirNode? = null,
+      val payload: ByteArray? = null,
+    ) {
+      var childStartIdx: Int = 0
+      var childCount: Int = 0
+      var blockOffset: Int = 0
+    }
+
+    // BFS layout so every directory's direct children are contiguous in the TOC
+    val toc = mutableListOf<TocSlot>()
+    toc.add(TocSlot(name = root.name, dirNode = root))
+
+    var queueCursor = 0
+    while (queueCursor < toc.size) {
+      val slot = toc[queueCursor]
+      val dNode = slot.dirNode
+      if (dNode != null) {
+        val childDirs = dNode.subDirs.values.sortedBy { it.name.lowercase() }
+        val childFiles = dNode.leafFiles.entries.sortedBy { it.key.lowercase() }
+        val totalChildren = childDirs.size + childFiles.size
+        if (totalChildren > 0) {
+          slot.childStartIdx = toc.size
+          slot.childCount = totalChildren
+          childDirs.forEach { d -> toc.add(TocSlot(name = d.name, dirNode = d)) }
+          childFiles.forEach { (fname, bytes) -> toc.add(TocSlot(name = fname, payload = bytes)) }
+        }
+      }
+      queueCursor++
+    }
+
+    val entryCount = toc.size
     val namesOut = ByteArrayOutputStream()
     namesOut.write(0) // index 0 empty root name
-    val nameOffsets = sorted.map { (name, _) ->
-      val off = namesOut.size()
-      namesOut.write(name.toByteArray(Charsets.UTF_8))
-      namesOut.write(0)
-      off
-    }
+    val nameOffsetCache = hashMapOf<String, Int>()
+    val entryNameOffsets =
+      toc.mapIndexed { idx, slot ->
+        if (idx == 0) {
+          0
+        } else {
+          nameOffsetCache.getOrPut(slot.name) {
+            val off = namesOut.size()
+            namesOut.write(slot.name.toByteArray(Charsets.UTF_8))
+            namesOut.write(0)
+            off
+          }
+        }
+      }
+
     val namesBytes = namesOut.toByteArray()
     val namesPaddedLen = ((namesBytes.size + 15) / 16) * 16
 
     val tocSize = entryCount * 16
     val dataStart = ((16 + tocSize + namesPaddedLen + 511) / 512) * 512
 
-    val dataOffsets = mutableListOf<Int>()
     var cursor = dataStart
-    for ((_, data) in sorted) {
-      dataOffsets.add(cursor)
-      cursor += ((data.size + 511) / 512) * 512
+    for (slot in toc) {
+      val payload = slot.payload
+      if (payload != null) {
+        slot.blockOffset = cursor / 512
+        val alignedLen = ((payload.size + 511) / 512) * 512
+        cursor += alignedLen.coerceAtLeast(512)
+      }
     }
+
     val totalSize = cursor.coerceAtLeast(dataStart)
     val out = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -268,24 +404,25 @@ object RpfAndArchiveParser {
     out.putInt(namesPaddedLen)
     out.putInt(ENC_OPEN)
 
-    // Root directory entry (index 0)
-    out.putInt(0)
-    out.putInt(0x7FFFFF00)
-    out.putInt(1)
-    out.putInt(sorted.size)
-
-    // File entries
-    for (i in sorted.indices) {
-      val data = sorted[i].value
-      val nameOff = nameOffsets[i] and 0xFFFF
-      val size = data.size
-      val blockOffset = dataOffsets[i] / 512
-      val w0 = nameOff or ((size and 0xFFFF) shl 16)
-      val w1 = ((size ushr 16) and 0xFF) or ((blockOffset and 0xFFFFFF) shl 8)
-      out.putInt(w0)
-      out.putInt(w1)
-      out.putInt(size)
-      out.putInt(0)
+    // TOC entries
+    for (i in toc.indices) {
+      val nameOff = entryNameOffsets[i] and 0xFFFF
+      val slot = toc[i]
+      val payload = slot.payload
+      if (payload == null) {
+        out.putInt(nameOff)
+        out.putInt(0x7FFFFF00)
+        out.putInt(slot.childStartIdx)
+        out.putInt(slot.childCount)
+      } else {
+        val size = payload.size
+        val w0 = nameOff or ((size and 0xFFFF) shl 16)
+        val w1 = ((size ushr 16) and 0xFF) or ((slot.blockOffset and 0xFFFFFF) shl 8)
+        out.putInt(w0)
+        out.putInt(w1)
+        out.putInt(size)
+        out.putInt(0)
+      }
     }
 
     // Names table
@@ -293,11 +430,45 @@ object RpfAndArchiveParser {
     out.put(namesBytes)
 
     // File payloads
-    for (i in sorted.indices) {
-      out.position(dataOffsets[i])
-      out.put(sorted[i].value)
+    for (slot in toc) {
+      val payload = slot.payload
+      if (payload != null && payload.isNotEmpty()) {
+        out.position(slot.blockOffset * 512)
+        out.put(payload)
+      }
     }
     return out.array()
+  }
+
+  fun formatHexDump(
+    bytes: ByteArray,
+    maxBytes: Int = 512,
+  ): String {
+    if (bytes.isEmpty()) return "(0 byte - file kosong)"
+    val limit = bytes.size.coerceAtMost(maxBytes)
+    val sb = StringBuilder()
+    var offset = 0
+    while (offset < limit) {
+      sb.append(String.format(java.util.Locale.US, "%04X: ", offset))
+      val ascii = StringBuilder()
+      for (col in 0 until 16) {
+        val idx = offset + col
+        if (idx < limit) {
+          val b = bytes[idx].toInt() and 0xFF
+          sb.append(String.format(java.util.Locale.US, "%02X ", b))
+          ascii.append(if (b in 32..126) b.toChar() else '.')
+        } else {
+          sb.append("   ")
+          ascii.append(' ')
+        }
+      }
+      sb.append("| ").append(ascii).append('\n')
+      offset += 16
+    }
+    if (bytes.size > limit) {
+      sb.append("... (+${bytes.size - limit} byte lainnya)")
+    }
+    return sb.toString().trimEnd()
   }
 
   fun listZipEntries(zipBytes: ByteArray): Result<List<ArchiveEntryInfo>> {

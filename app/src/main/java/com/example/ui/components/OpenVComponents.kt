@@ -12,11 +12,16 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -68,6 +73,8 @@ fun OpenVHeaderBar(
   editMode: Boolean,
   onToggleEditMode: () -> Unit,
   modifier: Modifier = Modifier,
+  contentWindowInsets: WindowInsets =
+    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
 ) {
   val pillBg by
     animateColorAsState(
@@ -97,7 +104,7 @@ fun OpenVHeaderBar(
       scrimStartAlpha = 0.86f,
       scrimEndAlpha = 0.62f,
     ) {
-      Column {
+      Column(modifier = Modifier.windowInsetsPadding(contentWindowInsets)) {
         Row(
           modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
           verticalAlignment = Alignment.CenterVertically,

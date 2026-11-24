@@ -1,29 +1,42 @@
 package com.example
 
+import android.content.Intent
+import android.graphics.Color as AndroidColor
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -39,10 +52,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -57,6 +74,7 @@ import com.example.ui.components.OivInstallerDialog
 import com.example.ui.components.OpenVHeaderBar
 import com.example.ui.screens.ExplorerScreen
 import com.example.ui.screens.ImageViewerScreen
+import com.example.ui.screens.RpfEditorScreen
 import com.example.ui.screens.ToolsScreen
 import com.example.ui.screens.XmlEditorScreen
 import com.example.ui.theme.EmeraldContainer
@@ -65,6 +83,7 @@ import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.OpenVTheme
 
 const val ROUTE_EXPLORER = "explorer"
+const val ROUTE_RPF_EDITOR = "rpf_editor"
 const val ROUTE_XML_EDITOR = "xml_editor"
 const val ROUTE_IMAGE_VIEWER = "image_viewer"
 const val ROUTE_TOOLS = "tools"
@@ -87,8 +106,15 @@ private val navItems =
       testTag = "nav_explorer",
     ),
     NavDestinationItem(
+      route = ROUTE_RPF_EDITOR,
+      label = "RPF",
+      selectedIcon = Icons.Rounded.Inventory2,
+      unselectedIcon = Icons.Outlined.Inventory2,
+      testTag = "nav_rpf_editor",
+    ),
+    NavDestinationItem(
       route = ROUTE_XML_EDITOR,
-      label = "XML Editor",
+      label = "XML",
       selectedIcon = Icons.Rounded.Code,
       unselectedIcon = Icons.Outlined.Code,
       testTag = "nav_xml_editor",
@@ -102,7 +128,7 @@ private val navItems =
     ),
     NavDestinationItem(
       route = ROUTE_TOOLS,
-      label = "Alat Mod",
+      label = "Alat",
       selectedIcon = Icons.Rounded.Build,
       unselectedIcon = Icons.Outlined.Build,
       testTag = "nav_tools",
@@ -110,19 +136,58 @@ private val navItems =
   )
 
 class MainActivity : ComponentActivity() {
+  private var pendingExternalUri by mutableStateOf<Uri?>(null)
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    enableEdgeToEdge()
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+    )
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      window.isNavigationBarContrastEnforced = false
+    }
+    pendingExternalUri = extractIncomingUri(intent)
+
     setContent {
       OpenVTheme(darkTheme = true) {
-        OpenVApp()
+        OpenVApp(
+          pendingExternalUri = pendingExternalUri,
+          onConsumedExternalUri = { pendingExternalUri = null },
+        )
       }
+    }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    extractIncomingUri(intent)?.let { pendingExternalUri = it }
+  }
+
+  private fun extractIncomingUri(intent: Intent?): Uri? {
+    if (intent == null) return null
+    return when (intent.action) {
+      Intent.ACTION_VIEW -> intent.data
+      Intent.ACTION_SEND -> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+          intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+          @Suppress("DEPRECATION")
+          intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+      }
+      else -> null
     }
   }
 }
 
 @Composable
-fun OpenVApp(viewModel: MainViewModel = viewModel()) {
+fun OpenVApp(
+  pendingExternalUri: Uri? = null,
+  onConsumedExternalUri: () -> Unit = {},
+  viewModel: MainViewModel = viewModel(),
+) {
   val navController = rememberNavController()
   val backStackEntry by navController.currentBackStackEntryAsState()
   val currentRoute = backStackEntry?.destination?.route ?: ROUTE_EXPLORER
@@ -130,6 +195,7 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
   val editMode by viewModel.editMode.collectAsStateWithLifecycle()
   val recentPaths by viewModel.recentPaths.collectAsStateWithLifecycle()
   val explorerState by viewModel.explorerState.collectAsStateWithLifecycle()
+  val rpfState by viewModel.rpfState.collectAsStateWithLifecycle()
   val xmlState by viewModel.xmlState.collectAsStateWithLifecycle()
   val imageState by viewModel.imageState.collectAsStateWithLifecycle()
   val toolsState by viewModel.toolsState.collectAsStateWithLifecycle()
@@ -153,6 +219,17 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
     }
   }
 
+  LaunchedEffect(pendingExternalUri) {
+    val uri = pendingExternalUri ?: return@LaunchedEffect
+    viewModel.openSafSingleFile(
+      uri = uri,
+      onOpenXml = { navigateTab(ROUTE_XML_EDITOR) },
+      onOpenImage = { navigateTab(ROUTE_IMAGE_VIEWER) },
+      onOpenedArchive = { navigateTab(ROUTE_EXPLORER) },
+    )
+    onConsumedExternalUri()
+  }
+
   val headerSubtitle =
     when (currentRoute) {
       ROUTE_EXPLORER ->
@@ -161,6 +238,8 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
           is ExplorerLocation.ArchiveView -> "${loc.archiveTitle}/${loc.innerPath}".trimEnd('/')
           is ExplorerLocation.SafTreeDir -> loc.displayStack.joinToString("/") { it.second }
         }
+      ROUTE_RPF_EDITOR ->
+        rpfState.archiveName.ifEmpty { "Editor Arsip RPF7 GTA V" }
       ROUTE_XML_EDITOR ->
         xmlState.fileName.ifEmpty { "Editor XML & Meta GTA V" }
       ROUTE_IMAGE_VIEWER ->
@@ -176,21 +255,20 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
       modifier = Modifier.fillMaxSize(),
       containerColor = MaterialTheme.colorScheme.background,
       contentWindowInsets = WindowInsets(0, 0, 0, 0),
-      snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+      snackbarHost = { SnackbarHost(hostState = snackbarHostState, modifier = Modifier.imePadding()) },
       topBar = {
         OpenVHeaderBar(
           title = "OpenV Studio",
           subtitle = headerSubtitle,
           editMode = editMode,
           onToggleEditMode = viewModel::toggleEditMode,
-          modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars),
         )
       },
       bottomBar = {
         if (!useNavRail) {
           NavigationBar(
             containerColor = MaterialTheme.colorScheme.surface,
-            windowInsets = WindowInsets.navigationBars,
+            windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
           ) {
             navItems.forEach { item ->
               val selected = currentRoute == item.route
@@ -203,7 +281,14 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
                     contentDescription = item.label,
                   )
                 },
-                label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
+                label = {
+                  Text(
+                    item.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                },
                 colors =
                   NavigationBarItemDefaults.colors(
                     selectedIconColor = EmeraldPrimary,
@@ -218,12 +303,20 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
       },
     ) { innerPadding ->
       Row(
-        modifier = Modifier.fillMaxSize().padding(innerPadding),
+        modifier =
+          Modifier.fillMaxSize()
+            .padding(innerPadding)
+            .consumeWindowInsets(innerPadding)
+            .imePadding(),
       ) {
         if (useNavRail) {
           NavigationRail(
             containerColor = MaterialTheme.colorScheme.surface,
-            modifier = Modifier.fillMaxHeight().windowInsetsPadding(WindowInsets.navigationBars),
+            modifier =
+              Modifier.fillMaxHeight()
+                .windowInsetsPadding(
+                  WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Start)
+                ),
           ) {
             navItems.forEach { item ->
               val selected = currentRoute == item.route
@@ -236,7 +329,14 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
                     contentDescription = item.label,
                   )
                 },
-                label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
+                label = {
+                  Text(
+                    item.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                },
                 colors =
                   NavigationRailItemDefaults.colors(
                     selectedIconColor = EmeraldOnContainer,
@@ -253,6 +353,15 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
           NavHost(
             navController = navController,
             startDestination = ROUTE_EXPLORER,
+            enterTransition = { fadeIn(animationSpec = tween(180)) },
+            exitTransition = { fadeOut(animationSpec = tween(150)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(180)) },
+            popExitTransition = {
+              scaleOut(
+                targetScale = 0.94f,
+                transformOrigin = TransformOrigin.Center,
+              ) + fadeOut(animationSpec = tween(180))
+            },
             modifier = Modifier.fillMaxSize(),
           ) {
             composable(ROUTE_EXPLORER) {
@@ -292,12 +401,49 @@ fun OpenVApp(viewModel: MainViewModel = viewModel()) {
                 onQuickOpenOiv = { name, relPath ->
                   viewModel.openLocalRelativeOiv(name, relPath)
                 },
+                onQuickOpenRpfEditor = {
+                  viewModel.openLocalSampleRpfInEditor()
+                  navigateTab(ROUTE_RPF_EDITOR)
+                },
+                onOpenRpfInEditor = { title, source ->
+                  viewModel.openRpfInEditor(title, source)
+                  navigateTab(ROUTE_RPF_EDITOR)
+                },
                 onCreateNewXml = { name, tpl ->
                   viewModel.createNewLocalXml(name, tpl) { navigateTab(ROUTE_XML_EDITOR) }
                 },
                 onCreateNewFolder = viewModel::createNewLocalFolder,
                 onRenameEntry = viewModel::renameLocalEntry,
                 onDeleteEntry = viewModel::deleteLocalEntry,
+              )
+            }
+
+            composable(ROUTE_RPF_EDITOR) {
+              RpfEditorScreen(
+                state = rpfState,
+                editMode = editMode,
+                onOpenSampleRpf = viewModel::openLocalSampleRpfInEditor,
+                onOpenRpfSafUri = viewModel::openRpfFromSafUri,
+                onCreateNewRpf = viewModel::createNewRpfArchive,
+                onNavigateFolder = viewModel::navigateRpfFolder,
+                onNavigateUp = viewModel::navigateRpfUp,
+                onSearchChanged = viewModel::setRpfSearchQuery,
+                onSelectEntryForHex = viewModel::selectRpfEntryForHex,
+                onOpenEntryInXml = { entryPath ->
+                  viewModel.openRpfEntryInXmlEditor(entryPath) { navigateTab(ROUTE_XML_EDITOR) }
+                },
+                onOpenEntryInImage = { entryPath ->
+                  viewModel.openRpfEntryInImageViewer(entryPath) { navigateTab(ROUTE_IMAGE_VIEWER) }
+                },
+                onCreateSubfolder = viewModel::createRpfSubfolder,
+                onCreateXmlFile = viewModel::createRpfXmlFile,
+                onImportFileFromSaf = viewModel::importFileIntoRpfFromSaf,
+                onRenameEntry = viewModel::renameRpfEntry,
+                onDeleteEntry = viewModel::deleteRpfEntry,
+                onExtractEntryToMods = viewModel::extractRpfEntryToMods,
+                onExtractEntryToSaf = viewModel::extractRpfEntryToSafUri,
+                onSaveRpf = viewModel::saveRpfArchive,
+                onExportRpfToSaf = viewModel::exportRpfArchiveToSafUri,
               )
             }
 

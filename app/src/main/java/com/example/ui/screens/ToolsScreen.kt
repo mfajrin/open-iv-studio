@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -86,13 +88,16 @@ fun ToolsScreen(
       if (uri != null) onInstallOivUri(uri)
     }
 
-  Column(
+  Box(
     modifier =
       modifier
         .fillMaxSize()
         .background(MaterialTheme.colorScheme.background)
-        .verticalScroll(rememberScrollState())
-        .padding(16.dp),
+        .verticalScroll(rememberScrollState()),
+    contentAlignment = Alignment.TopCenter,
+  ) {
+  Column(
+    modifier = Modifier.widthIn(max = 840.dp).fillMaxWidth().padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(16.dp),
   ) {
     // GTA V Tools Header Banner
@@ -353,11 +358,16 @@ fun ToolsScreen(
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Text(
+          text = "Kompatibilitas Sistem: Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) • Target SDK 36 (Android 16) • SAF & Photo Picker",
+          style = MaterialTheme.typography.labelSmall,
+          color = EmeraldPrimary,
+        )
         Row(
           modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          listOf("RPF7 OPEN", "OIV / ZIP", "XML / META", "DDS DXT1/3/5", "TGA", "PNG / WEBP").forEach { tag ->
+          listOf("ANDROID 16", "RPF7 OPEN", "OIV / ZIP", "XML / META", "DDS DXT1/3/5", "TGA", "PNG / WEBP").forEach { tag ->
             FormatTagPill(text = tag, accent = CyanTertiary)
           }
         }
@@ -372,6 +382,7 @@ fun ToolsScreen(
         }
       }
     }
+  }
   }
 
   if (confirmReset) {
