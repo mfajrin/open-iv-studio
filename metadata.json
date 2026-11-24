@@ -1,0 +1,6 @@
+{
+  "name": "OpenV Studio",
+  "description": "Explorer arsip dan modding ala OpenIV untuk GTA V, lengkap dengan XML/Meta Editor dan Penampil Tekstur & Gambar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
